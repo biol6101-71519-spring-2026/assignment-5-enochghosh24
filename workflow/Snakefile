@@ -1,8 +1,277 @@
-# Load configuration
-configfile: 'config/config.yaml'
+configfile: "config/config.yaml"
+
+GENES = config["genes"]
+DATA = config["data_dir"]
+RESULTS = config["results_dir"]
+
+BOOTSTRAP = config.get("bootstrap", 1000)
+THREADS = config.get("threads", 4)
 
 
-# Rule all: define the final outputs of the workflow
+# -------------------
+# FINAL TARGET
+# -------------------
 rule all:
     input:
-        # Define all final output files here
+        expand(f"{RESULTS}/model_selection/{{gene}}.iqtree", gene=GENES),
+        f"{RESULTS}/model_selection/best_models_summary.txt",
+
+        expand(f"{RESULTS}/trees/individual/{{gene}}.treefile", gene=GENES),
+        expand(f"{RESULTS}/trees/individual/{{gene}}.contree", gene=GENES),
+
+        f"{RESULTS}/trees/coalescent/species_tree.treefile",
+
+        f"{RESULTS}/concatenated/concatenated.aln",
+        f"{RESULTS}/trees/concatenated/concatenated.treefile",
+
+        f"{RESULTS}/tree_comparison/rf_all.txt",
+        f"{RESULTS}/tree_comparison/comparison_summary.txt",
+        f"{RESULTS}/tree_comparison/topological_summary.txt",
+        f"{RESULTS}/tree_comparison/concordance_analysis.txt",
+
+        expand(f"{RESULTS}/visualizations/{{gene}}_tree.pdf", gene=GENES),
+        f"{RESULTS}/visualizations/coalescent_tree.pdf",
+        f"{RESULTS}/visualizations/concatenated_tree.pdf",
+        f"{RESULTS}/visualizations/method_comparison.pdf",
+
+        f"{RESULTS}/report/phylogenetic_analysis_report.txt"
+
+
+# -------------------
+# ALIGNMENT
+# -------------------
+rule mafft:
+    input:
+        f"{DATA}/{{gene}}_clean.fasta"
+    output:
+        f"{RESULTS}/alignments/raw/{{gene}}.aln"
+    threads: THREADS
+    shell:
+        "mkdir -p {RESULTS}/alignments/raw && mafft --auto {input} > {output}"
+
+
+rule trimal:
+    input:
+        f"{RESULTS}/alignments/raw/{{gene}}.aln"
+    output:
+        f"{RESULTS}/alignments/trimmed/{{gene}}.aln"
+    shell:
+        "mkdir -p {RESULTS}/alignments/trimmed && trimal -automated1 -in {input} -out {output}"
+
+
+# -------------------
+# MODEL SELECTION
+# -------------------
+rule model_selection:
+    input:
+        f"{RESULTS}/alignments/trimmed/{{gene}}.aln"
+    output:
+        f"{RESULTS}/model_selection/{{gene}}.iqtree"
+    threads: THREADS
+    shell:
+        "mkdir -p {RESULTS}/model_selection && iqtree2 -s {input} -m MFP -nt {threads} -redo -pre {RESULTS}/model_selection/{wildcards.gene}"
+
+
+rule summarize_models:
+    input:
+        expand(f"{RESULTS}/model_selection/{{gene}}.iqtree", gene=GENES)
+    output:
+        f"{RESULTS}/model_selection/best_models_summary.txt"
+    shell:
+        r"""
+        echo -e "Gene\tBestModel" > {output}
+        for f in {input}; do
+            gene=$(basename $f .iqtree)
+            model=$(grep -i "BEST-FIT MODEL" $f | head -n1 | awk -F: '{{print $2}}')
+            echo -e "$gene\t$model" >> {output}
+        done
+        """
+
+
+# -------------------
+# GENE TREES
+# -------------------
+rule iqtree_gene:
+    input:
+        f"{RESULTS}/alignments/trimmed/{{gene}}.aln"
+    output:
+        treefile=f"{RESULTS}/trees/individual/{{gene}}.treefile",
+        contree=f"{RESULTS}/trees/individual/{{gene}}.contree",
+        log=f"{RESULTS}/trees/individual/{{gene}}.log"
+    threads: THREADS
+    shell:
+        "mkdir -p {RESULTS}/trees/individual && iqtree2 -s {input} -m MFP -bb 1000 -bnni -nt {threads} -redo -pre {RESULTS}/trees/individual/{wildcards.gene}"
+
+
+# -------------------
+# COALESCENT TREE
+# -------------------
+rule prepare_astral:
+    input:
+        expand(f"{RESULTS}/trees/individual/{{gene}}.treefile", gene=GENES)
+    output:
+        f"{RESULTS}/trees/coalescent/gene_trees.tre"
+    shell:
+        "mkdir -p {RESULTS}/trees/coalescent && cat {input} > {output}"
+
+
+rule astral:
+    input:
+        f"{RESULTS}/trees/coalescent/gene_trees.tre"
+    output:
+        f"{RESULTS}/trees/coalescent/species_tree.treefile"
+    shell:
+        "mkdir -p {RESULTS}/trees/coalescent && astral -i {input} -o {output}"
+
+
+# -------------------
+# CONCATENATION
+# -------------------
+rule concatenate:
+    input:
+        expand(f"{RESULTS}/alignments/trimmed/{{gene}}.aln", gene=GENES)
+    output:
+        alignment=f"{RESULTS}/concatenated/concatenated.aln",
+        partitions=f"{RESULTS}/concatenated/concatenated_partitions.txt"
+    run:
+        import os
+        from Bio import AlignIO
+
+        os.makedirs(f"{RESULTS}/concatenated", exist_ok=True)
+
+        alignments = [AlignIO.read(f, "fasta") for f in input]
+        taxa = sorted({rec.id for aln in alignments for rec in aln})
+        concat = {t: "" for t in taxa}
+
+        start = 1
+        partitions = []
+
+        for aln in alignments:
+            length = aln.get_alignment_length()
+            partitions.append((start, start + length - 1))
+            aln_dict = {rec.id: str(rec.seq) for rec in aln}
+
+            for t in taxa:
+                concat[t] += aln_dict.get(t, "-" * length)
+
+            start += length
+
+        with open(output.alignment, "w") as out:
+            for t in taxa:
+                out.write(f">{t}\n{concat[t]}\n")
+
+        with open(output.partitions, "w") as out:
+            for i, (s, e) in enumerate(partitions):
+                out.write(f"gene{i+1} = {s}-{e}\n")
+
+
+rule iqtree_concat:
+    input:
+        f"{RESULTS}/concatenated/concatenated.aln"
+    output:
+        f"{RESULTS}/trees/concatenated/concatenated.treefile"
+    threads: THREADS
+    shell:
+        "mkdir -p {RESULTS}/trees/concatenated && iqtree2 -s {input} -m MFP -B {BOOTSTRAP} -bnni -nt {threads} -redo -pre {RESULTS}/trees/concatenated/concatenated"
+
+
+# -------------------
+# TREE COMPARISON
+# -------------------
+rule rf_all:
+    input:
+        gene_trees=expand(f"{RESULTS}/trees/individual/{{gene}}.treefile", gene=GENES),
+        species_tree=f"{RESULTS}/trees/coalescent/species_tree.treefile",
+        concat_tree=f"{RESULTS}/trees/concatenated/concatenated.treefile"
+    output:
+        f"{RESULTS}/tree_comparison/rf_all.txt"
+    script:
+        "scripts/compute_rf.py"
+
+
+rule comparison_summary:
+    input:
+        f"{RESULTS}/tree_comparison/rf_all.txt"
+    output:
+        f"{RESULTS}/tree_comparison/comparison_summary.txt"
+    script:
+        "scripts/rf_distance.py"
+
+
+rule topology:
+    input:
+        f"{RESULTS}/tree_comparison/rf_all.txt"
+    output:
+        f"{RESULTS}/tree_comparison/topological_summary.txt"
+    shell:
+        "cp {input} {output}"
+
+
+rule concordance:
+    input:
+        f"{RESULTS}/tree_comparison/rf_all.txt"
+    output:
+        f"{RESULTS}/tree_comparison/concordance_analysis.txt"
+    shell:
+        "cp {input} {output}"
+
+
+# -------------------
+# VISUALIZATION
+# -------------------
+rule plot_gene_trees:
+    input:
+        f"{RESULTS}/trees/individual/{{gene}}.treefile"
+    output:
+        f"{RESULTS}/visualizations/{{gene}}_tree.pdf"
+    shell:
+        "mkdir -p {RESULTS}/visualizations && QT_QPA_PLATFORM=offscreen python workflow/scripts/plot_tree.py {input} {output}"
+
+
+rule plot_coalescent:
+    input:
+        f"{RESULTS}/trees/coalescent/species_tree.treefile"
+    output:
+        f"{RESULTS}/visualizations/coalescent_tree.pdf"
+    shell:
+        "QT_QPA_PLATFORM=offscreen python workflow/scripts/plot_tree.py {input} {output}"
+
+
+rule plot_concat:
+    input:
+        f"{RESULTS}/trees/concatenated/concatenated.treefile"
+    output:
+        f"{RESULTS}/visualizations/concatenated_tree.pdf"
+    shell:
+        "QT_QPA_PLATFORM=offscreen python workflow/scripts/plot_tree.py {input} {output}"
+
+
+rule plot_comparison:
+    input:
+        species=f"{RESULTS}/trees/coalescent/species_tree.treefile"
+    output:
+        f"{RESULTS}/visualizations/method_comparison.pdf"
+    shell:
+        "QT_QPA_PLATFORM=offscreen python workflow/scripts/plot_tree.py {input.species} {output}"
+
+
+# -------------------
+# REPORT
+# -------------------
+rule report:
+    input:
+        rf=f"{RESULTS}/tree_comparison/rf_all.txt",
+        summary=f"{RESULTS}/tree_comparison/comparison_summary.txt"
+    output:
+        f"{RESULTS}/report/phylogenetic_analysis_report.txt"
+    shell:
+        """
+        mkdir -p {RESULTS}/report
+        echo "Phylogenetic analysis completed" > {output}
+        echo "" >> {output}
+        echo "=== RF DISTANCES ===" >> {output}
+        cat {input.rf} >> {output}
+        echo "" >> {output}
+        echo "=== SUMMARY ===" >> {output}
+        cat {input.summary} >> {output}
+        """
