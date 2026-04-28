@@ -8,9 +8,8 @@ BOOTSTRAP = config.get("bootstrap", 1000)
 THREADS = config.get("threads", 4)
 
 
-# -------------------
 # FINAL TARGET
-# -------------------
+
 rule all:
     input:
         expand(f"{RESULTS}/model_selection/{{gene}}.iqtree", gene=GENES),
@@ -37,9 +36,9 @@ rule all:
         f"{RESULTS}/report/phylogenetic_analysis_report.txt"
 
 
-# -------------------
+
 # ALIGNMENT
-# -------------------
+
 rule mafft:
     input:
         f"{DATA}/{{gene}}_clean.fasta"
@@ -59,9 +58,9 @@ rule trimal:
         "mkdir -p {RESULTS}/alignments/trimmed && trimal -automated1 -in {input} -out {output}"
 
 
-# -------------------
+
 # MODEL SELECTION
-# -------------------
+
 rule model_selection:
     input:
         f"{RESULTS}/alignments/trimmed/{{gene}}.aln"
@@ -88,9 +87,9 @@ rule summarize_models:
         """
 
 
-# -------------------
+
 # GENE TREES
-# -------------------
+
 rule iqtree_gene:
     input:
         f"{RESULTS}/alignments/trimmed/{{gene}}.aln"
@@ -103,9 +102,8 @@ rule iqtree_gene:
         "mkdir -p {RESULTS}/trees/individual && iqtree2 -s {input} -m MFP -bb 1000 -bnni -nt {threads} -redo -pre {RESULTS}/trees/individual/{wildcards.gene}"
 
 
-# -------------------
 # COALESCENT TREE
-# -------------------
+
 rule prepare_astral:
     input:
         expand(f"{RESULTS}/trees/individual/{{gene}}.treefile", gene=GENES)
@@ -124,9 +122,8 @@ rule astral:
         "mkdir -p {RESULTS}/trees/coalescent && astral -i {input} -o {output}"
 
 
-# -------------------
 # CONCATENATION
-# -------------------
+
 rule concatenate:
     input:
         expand(f"{RESULTS}/alignments/trimmed/{{gene}}.aln", gene=GENES)
@@ -175,9 +172,9 @@ rule iqtree_concat:
         "mkdir -p {RESULTS}/trees/concatenated && iqtree2 -s {input} -m MFP -B {BOOTSTRAP} -bnni -nt {threads} -redo -pre {RESULTS}/trees/concatenated/concatenated"
 
 
-# -------------------
+
 # TREE COMPARISON
-# -------------------
+
 rule rf_all:
     input:
         gene_trees=expand(f"{RESULTS}/trees/individual/{{gene}}.treefile", gene=GENES),
@@ -216,9 +213,8 @@ rule concordance:
         "cp {input} {output}"
 
 
-# -------------------
 # VISUALIZATION
-# -------------------
+
 rule plot_gene_trees:
     input:
         f"{RESULTS}/trees/individual/{{gene}}.treefile"
@@ -255,9 +251,9 @@ rule plot_comparison:
         "QT_QPA_PLATFORM=offscreen python workflow/scripts/plot_tree.py {input.species} {output}"
 
 
-# -------------------
+
 # REPORT
-# -------------------
+
 rule report:
     input:
         rf=f"{RESULTS}/tree_comparison/rf_all.txt",
